@@ -25,11 +25,123 @@ import os
 import tempfile
 import shutil
 import numpy as np
-import cv2 as cv
+import cv2 as cv # The project uses 'cv' as an alias for cv2
 
 # Import Kumiko's core library and its page module dependency
 import kumikolib
 import lib.page
+
+# ----------------------------------------------------------------------
+# Border Removal Function and Dependencies
+# ----------------------------------------------------------------------
+
+# Ensure the thinning function is available
+try:
+    # Attempt to import the thinning function from the contrib module
+    from cv2.ximgproc import thinning
+except ImportError:
+    # If opencv-contrib-python is not installed, print a warning and provide a dummy function
+    print("Warning: cv2.ximgproc.thinning not found. Border removal might be less effective.")
+    print("Please install 'opencv-contrib-python' via 'pip install opencv-contrib-python'")
+    def thinning(src, thinningType=None): # Dummy function to prevent crashes
+        return src
+
+
+def _find_best_border_line(roi_mask: np.ndarray, axis: int, scan_range: range) -> int:
+    """
+    A helper function to find the best border line along a single axis.
+    It scans from the inside-out and returns the index of the line with the highest score.
+    """
+    best_index, max_score = scan_range.start, -1
+    
+    total_span = abs(scan_range.stop - scan_range.start)
+    if total_span == 0:
+        return best_index
+
+    for i in scan_range:
+        if axis == 1: # Horizontal scan (for top/bottom borders)
+            continuity_score = np.count_nonzero(roi_mask[i, :])
+        else: # Vertical scan (for left/right borders)
+            continuity_score = np.count_nonzero(roi_mask[:, i])
+            
+        progress = abs(i - scan_range.start)
+        position_weight = progress / total_span
+        
+        score = continuity_score * (1 + position_weight)
+        
+        if score >= max_score:
+            max_score, best_index = score, i
+            
+    return best_index
+
+
+def remove_border(panel_image: np.ndarray, 
+                  search_zone_ratio: float = 0.25, 
+                  padding: int = 5) -> np.ndarray:
+    """
+    Removes borders using skeletonization and weighted projection analysis.
+    """
+    if panel_image is None or panel_image.shape[0] < 30 or panel_image.shape[1] < 30:
+        return panel_image
+
+    pad_size = 15
+    # Use 'cv' which is the alias for cv2 in this project
+    padded_image = cv.copyMakeBorder(
+        panel_image, pad_size, pad_size, pad_size, pad_size,
+        cv.BORDER_CONSTANT, value=[255, 255, 255]
+    )
+    
+    gray = cv.cvtColor(padded_image, cv.COLOR_BGR2GRAY)
+    _, thresh = cv.threshold(gray, 240, 255, cv.THRESH_BINARY_INV)
+    
+    contours, _ = cv.findContours(thresh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return panel_image
+
+    largest_contour = max(contours, key=cv.contourArea)
+    x, y, w, h = cv.boundingRect(largest_contour)
+
+    filled_mask = np.zeros_like(gray)
+    cv.drawContours(filled_mask, [largest_contour], -1, 255, cv.FILLED)
+    
+    erosion_iterations = 5 
+    hollow_contour = cv.subtract(filled_mask, cv.erode(filled_mask, np.ones((3,3), np.uint8), iterations=erosion_iterations))
+    
+    skeleton = thinning(hollow_contour)
+    
+    roi_mask = skeleton[y:y+h, x:x+w]
+
+    top_search_end = int(h * search_zone_ratio)
+    bottom_search_start = h - top_search_end
+    left_search_end = int(w * search_zone_ratio)
+    right_search_start = w - left_search_end
+    
+    top_range = range(top_search_end, -1, -1)
+    bottom_range = range(bottom_search_start, h)
+    left_range = range(left_search_end, -1, -1)
+    right_range = range(right_search_start, w)
+    
+    best_top_y = _find_best_border_line(roi_mask, axis=1, scan_range=top_range)
+    best_bottom_y = _find_best_border_line(roi_mask, axis=1, scan_range=bottom_range)
+    best_left_x = _find_best_border_line(roi_mask, axis=0, scan_range=left_range)
+    best_right_x = _find_best_border_line(roi_mask, axis=0, scan_range=right_range)
+
+    final_x1 = x + best_left_x + padding
+    final_y1 = y + best_top_y + padding
+    final_x2 = x + best_right_x - padding
+    final_y2 = y + best_bottom_y - padding
+    
+    if final_x1 >= final_x2 or final_y1 >= final_y2: 
+        return panel_image
+        
+    cropped = padded_image[final_y1:final_y2, final_x1:final_x2]
+    
+    if cropped.shape[0] < 10 or cropped.shape[1] < 10: 
+        return panel_image
+        
+    return cropped
+
 
 # ----------------------------------------------------------------------
 # Core functions to solve the non-English path issue
@@ -84,7 +196,7 @@ kumikolib.cv.imwrite = imwrite_unicode
 # Gradio Processing Function
 # ----------------------------------------------------------------------
 
-def process_manga_images(files, output_structure, use_rtl, progress=gr.Progress(track_tqdm=True)):
+def process_manga_images(files, output_structure, use_rtl, remove_borders, progress=gr.Progress(track_tqdm=True)):
     """
     The main processing logic for the Gradio interface.
     Receives uploaded files and settings, processes them, and returns a path to a ZIP file.
@@ -133,6 +245,10 @@ def process_manga_images(files, output_structure, use_rtl, progress=gr.Progress(
                 x, y, width, height = panel.to_xywh()
                 panel_img = page.img[y:y + height, x:x + width]
                 
+                # If the user checked the box, attempt to remove borders
+                if remove_borders:
+                    panel_img = remove_border(panel_img)
+
                 output_filepath = ""
                 # Check user's choice for the output structure
                 if output_structure == "Group panels in folders":
@@ -196,8 +312,8 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                 file_types=["image"],
             )
             
-            with gr.Accordion("Advanced Settings", open=False):
-                # Add the new Radio button for selecting the output structure
+            with gr.Accordion("Advanced Settings", open=True):
+                # Add the Radio button for selecting the output structure
                 output_structure_choice = gr.Radio(
                     label="ZIP File Structure",
                     choices=["Group panels in folders", "Create a flat directory"],
@@ -205,11 +321,18 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     info="Choose how to organize panels in the output ZIP file."
                 )
                 
-                # Add the new Checkbox for RTL setting
+                # Add the Checkbox for RTL setting
                 rtl_checkbox = gr.Checkbox(
                     label="Right-to-Left (RTL) Reading Order",
-                    value=False, # Default to False
+                    value=True, # Default to True
                     info="Check this for manga that is read from right to left."
+                )
+
+                # Add the Checkbox for removing borders
+                remove_borders_checkbox = gr.Checkbox(
+                    label="Attempt to remove panel borders",
+                    value=False,
+                    info="Crops the image to the content area. May not be perfect for all images."
                 )
             
             process_button = gr.Button("Start Analysis & Cropping", variant="primary")
@@ -221,7 +344,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
     process_button.click(
         fn=process_manga_images,
-        inputs=[image_input, output_structure_choice, rtl_checkbox],
+        inputs=[image_input, output_structure_choice, rtl_checkbox, remove_borders_checkbox],
         outputs=output_zip,
         api_name="process"
     )

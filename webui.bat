@@ -10,7 +10,7 @@ set APPLICATION_NAME=app.py
 :: Define the name of the virtual environment directory
 set VENV_NAME=venv
 :: Set to 1 to always attempt to update packages from requirements.txt on every launch
-set ALWAYS_UPDATE_REQS=1
+set ALWAYS_UPDATE_REQS=0
 :: ---------------------------------
 
 
