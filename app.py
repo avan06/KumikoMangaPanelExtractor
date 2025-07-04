@@ -30,7 +30,7 @@ import cv2 as cv # The project uses 'cv' as an alias for cv2
 # Import Kumiko's core library and its page module dependency
 import kumikolib
 import lib.page
-from image_panel_border_cleaner import remove_border
+from manga_panel_processor import remove_border
 
 
 # ----------------------------------------------------------------------

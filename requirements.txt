@@ -2,4 +2,4 @@ opencv-contrib-python
 requests
 gradio
 
-git+https://github.com/avan06/image-panel-border-cleaner.git
+git+https://github.com/avan06/manga-panel-processor.git
